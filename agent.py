@@ -1,6 +1,7 @@
 """Math agent that solves questions using tools in a ReAct loop."""
 
 import json
+import time
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent
@@ -11,8 +12,8 @@ load_dotenv()
 # Configure your model below. Examples:
 #   "google-gla:gemini-2.5-flash"       (needs GOOGLE_API_KEY)
 #   "openai:gpt-4o-mini"                (needs OPENAI_API_KEY)
-#   "anthropic:claude-sonnet-4-6"    (needs ANTHROPIC_API_KEY)
-MODEL = "google-gla:gemini-2.5-flash"
+#   "anthropic:claude-sonnet-4-6"       (needs ANTHROPIC_API_KEY)
+MODEL = "google-gla:gemini-2.5-flash-lite"
 
 agent = Agent(
     MODEL,
@@ -20,6 +21,8 @@ agent = Agent(
         "You are a helpful assistant. Solve each question step by step. "
         "Use the calculator tool for arithmetic. "
         "Use the product_lookup tool when a question mentions products from the catalog. "
+        "You may call product_lookup multiple times in the same question if more than one product is needed. "
+        "If a question asks for totals, differences, comparisons, or budgets involving products, first look up all needed product prices, then use the calculator tool. "
         "If a question cannot be answered with the information given, say so."
     ),
 )
@@ -34,19 +37,19 @@ def calculator_tool(expression: str) -> str:
     return calculate(expression)
 
 
-# TODO: Implement this tool by uncommenting the code below and replacing
-# the ... with your implementation. The tool should:
-#   1. Read products.json using json.load() (json is already imported above)
-#   2. If the product_name is in the catalog, return its price as a string
-#   3. If not found, return the list of available product names so the agent
-#      can try again with the correct name
-#
-# @agent.tool_plain
-# def product_lookup(product_name: str) -> str:
-#     """Look up the price of a product by name.
-#     Use this when a question asks about product prices from the catalog.
-#     """
-#     ...
+@agent.tool_plain
+def product_lookup(product_id: str) -> str:
+    """Look up the price of a product by name.
+    Use this when a question asks about product prices from the catalog.
+    """
+    with open("products.json", "r") as f:
+        products = json.load(f)
+
+    if product_id in products:
+        return str(products[product_id])
+
+    available_products = list(products.keys())
+    return f"Product not found. Available products: {available_products}"
 
 
 def load_questions(path: str = "math_questions.md") -> list[str]:
@@ -66,7 +69,24 @@ def main():
         print(f"## Question {i}")
         print(f"> {question}\n")
 
-        result = agent.run_sync(question)
+        max_retries = 5
+        result = None
+
+        for attempt in range(max_retries):
+            try:
+                result = agent.run_sync(question)
+                break
+            except Exception as e:
+                error_message = str(e)
+                if "503" in error_message or "UNAVAILABLE" in error_message:
+                    wait_time = 5 * (attempt + 1)
+                    print(f"Model busy. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    raise
+
+        if result is None:
+            raise RuntimeError(f"Failed after {max_retries} retries for question {i}")
 
         print("### Trace")
         for message in result.all_messages():
